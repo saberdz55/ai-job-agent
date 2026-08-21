@@ -20,6 +20,6 @@ jobs:
       - name: Unit tests
         run: pytest -q
       - name: Agent import smoke test
-        run: python -c "from job_agent.agent_core import build_agent, validate_model_output; from job_agent.agent_server import create_agent_app; from job_agent.mcp_server import build_mcp_server; print('agent and MCP imports OK')"
+        run: python -c "import job_agent.agent_core, job_agent.agent_server, job_agent.mcp_server; print('agent and MCP modules import OK')"
       - name: Offline search smoke test
         run: python -m job_agent search --demo

@@ -23,7 +23,6 @@ dependencies = [
     "python-docx>=1.1",
     "reportlab>=4.0",
     "pdfminer.six>=20240706",
-    "playwright>=1.40",
 ]
 
 [project.optional-dependencies]
@@ -36,9 +35,19 @@ dashboard = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
 ]
+phone = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+desktop = [
+    "playwright>=1.40",
+    "uvicorn>=0.29",
+    "fastapi>=0.110",
+]
 
 [project.scripts]
 job-agent = "job_agent.cli:main"
+job-agent-phone = "job_agent.phone:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/job_agent"]

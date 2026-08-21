@@ -1,10 +1,9 @@
 """Least-privilege MCP server for controlling the Job Agent.
 
-This server intentionally exposes discovery/inspection/preparation only. It does
-not expose credentials, arbitrary filesystem access, browser JavaScript, or final
-application submission. For remote ChatGPT use, place the Streamable HTTP
-transport behind HTTPS and authentication; do not expose a local stdio server
-publicly.
+The MCP surface exposes job discovery and the explicitly enabled autonomous
+application workflow. It never exposes credentials, arbitrary shell/filesystem
+execution, browser JavaScript, or anti-bot bypass. CAPTCHA/login/2FA and
+unresolved sensitive/legal fields remain hard stops.
 """
 from __future__ import annotations
 
@@ -19,6 +18,7 @@ def build_mcp_server():
         raise RuntimeError("Install MCP support: pip install -e '.[mcp,phone-agent]'") from exc
 
     from job_agent.agent_core import build_agent
+    from job_agent.auto_apply import auto_apply_enabled
     from job_agent.config import load_settings
 
     settings = load_settings()
@@ -27,7 +27,6 @@ def build_mcp_server():
     data_dir = Path(settings.data_dir)
     profile = Path("search_profile.yaml")
     agent = build_agent(data_dir=data_dir, profile=profile)
-
     mcp = FastMCP("Job Agent")
 
     @mcp.tool()
@@ -37,30 +36,28 @@ def build_mcp_server():
             "ok": True,
             "agent": "job-agent",
             "model": settings.active_model(),
-            "memory": "sqlite",
-            "browser": "desktop worker / preview-only bridge",
-            "automatic_submission": False,
+            "memory": "sqlite/local worker",
+            "browser": "desktop Playwright worker",
+            "automatic_submission": auto_apply_enabled(),
+            "hard_stops": ["captcha", "login", "2fa", "unknown_required_field", "sensitive_attestation"],
         }
+
+    async def invoke_tool(name: str, payload: dict) -> dict:
+        for tool in agent.tools:
+            if getattr(tool, "name", "") == name:
+                result = await tool.on_invoke_tool(None, json.dumps(payload))
+                return json.loads(result)
+        raise RuntimeError(f"{name} tool unavailable")
 
     @mcp.tool()
     async def search_jobs(days: int = 7, limit: int = 25) -> dict:
         """Find and rank jobs using the deterministic job pipeline."""
-        # Reuse the Agent tool implementation through the SDK instead of duplicating
-        # the discovery logic in the MCP layer.
-        for tool in agent.tools:
-            if getattr(tool, "name", "") == "search_jobs":
-                result = await tool.on_invoke_tool(None, json.dumps({"days": days, "limit": limit}))
-                return json.loads(result)
-        raise RuntimeError("search_jobs tool unavailable")
+        return await invoke_tool("search_jobs", {"days": days, "limit": limit})
 
     @mcp.tool()
     async def inspect_job(job_id: str) -> dict:
         """Inspect a previously discovered job by ID."""
-        for tool in agent.tools:
-            if getattr(tool, "name", "") == "get_job":
-                result = await tool.on_invoke_tool(None, json.dumps({"job_id": job_id}))
-                return json.loads(result)
-        raise RuntimeError("get_job tool unavailable")
+        return await invoke_tool("get_job", {"job_id": job_id})
 
     @mcp.tool()
     async def candidate_facts_status() -> dict:
@@ -70,12 +67,17 @@ def build_mcp_server():
 
     @mcp.tool()
     async def prepare_application(job_id: str) -> dict:
-        """Prepare a review-only application plan; never submit an application."""
-        for tool in agent.tools:
-            if getattr(tool, "name", "") == "prepare_application":
-                result = await tool.on_invoke_tool(None, json.dumps({"job_id": job_id}))
-                return json.loads(result)
-        raise RuntimeError("prepare_application tool unavailable")
+        """Prepare an application plan without submitting."""
+        return await invoke_tool("prepare_application", {"job_id": job_id})
+
+    @mcp.tool()
+    async def auto_apply_job(job_id: str) -> dict:
+        """Run exactly one qualified application in autonomous mode.
+
+        Requires JOB_AGENT_AUTO_APPLY=true. Existing duplicate, factual, form,
+        CAPTCHA/login/2FA and sensitive-field gates remain active.
+        """
+        return await invoke_tool("auto_apply_job", {"job_id": job_id})
 
     return mcp
 
@@ -87,8 +89,6 @@ def main() -> int:
     transport = os.environ.get("JOB_AGENT_MCP_TRANSPORT", "stdio").strip().lower()
     if transport not in {"stdio", "streamable-http"}:
         raise SystemExit("JOB_AGENT_MCP_TRANSPORT must be stdio or streamable-http")
-    # Streamable HTTP is intentionally opt-in. A production deployment must put
-    # this endpoint behind HTTPS and an authenticated reverse proxy before exposing it.
     mcp.run(transport=transport)
     return 0
 

@@ -1,8 +1,7 @@
 """Real OpenAI Agent orchestration for the job-agent project.
 
-The LLM plans and selects tools; deterministic Python code performs job discovery,
-matching and local state changes. Secrets stay server-side. Submission and
-anti-bot controls are never exposed as agent tools.
+The LLM plans and selects bounded tools; deterministic Python code performs job
+discovery, matching and local state changes. Secrets stay server-side.
 """
 from __future__ import annotations
 
@@ -30,7 +29,7 @@ RULES:
   extension is the visible form-filling plane.
 - CAPTCHA, login, 2FA, legal attestations and unknown sensitive questions are
   STOP conditions for user action; never bypass them.
-- There is NO submit tool. The final submission is always a human action.
+- There is NO submit tool in the Agent. Final submission is always a human action.
 - When a task is ambiguous, ask one concise question rather than guessing.
 - Keep tool calls bounded: search at most 90 days and 100 returned jobs per call.
 """
@@ -49,29 +48,33 @@ def _safe_data_path(data_dir: Path, name: str) -> Path:
 
 
 def build_agent(*, data_dir: Path, profile: Path):
-    """Build an OpenAI Agents SDK Agent with lazy optional dependency loading."""
+    """Build the OpenAI Agents SDK Agent with lazy dependency loading."""
     try:
         from agents import Agent, function_tool
     except ImportError as exc:
         raise RuntimeError("Install agent support: pip install -e '.[phone-agent]'") from exc
 
     settings = load_settings()
-    # The base CLI remains backward-compatible with Anthropic, but the Agent
-    # should prefer OpenAI when the user supplied only an OpenAI key.
-    if settings.provider == "anthropic" and settings.openai_api_key and not settings.anthropic_api_key:
-        settings.provider = "openai"
+    if settings.provider != "openai":
+        raise RuntimeError(
+            "The OpenAI Agent runtime requires JOB_AGENT_PROVIDER=openai. "
+            "Set OPENAI_API_KEY and optionally OPENAI_MODEL."
+        )
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured.")
+
+    data_dir.mkdir(parents=True, exist_ok=True)
 
     @function_tool
     def inspect_status() -> str:
         """Return runtime capabilities without exposing secrets."""
         return _json({
             "runtime": "android-phone",
-            "provider": settings.provider,
+            "provider": "openai",
             "model": settings.active_model(),
-            "llm_configured": settings.has_llm_key(),
             "capabilities": [
                 "job_discovery", "fit_scoring", "job_inspection",
-                "candidate_facts", "application_preparation", "session_memory"
+                "candidate_facts", "application_preparation", "session_memory",
             ],
             "desktop_playwright": False,
             "automatic_submission": False,
@@ -127,7 +130,7 @@ def build_agent(*, data_dir: Path, profile: Path):
 
     @function_tool
     def get_candidate_facts() -> str:
-        """Read the candidate fact sheet used for truthful tailoring; secrets are excluded."""
+        """Read the candidate fact sheet used for truthful tailoring."""
         path = _safe_data_path(data_dir, "career_facts.yaml")
         if not path.exists():
             return _json({"ok": False, "error": "candidate_facts_missing",

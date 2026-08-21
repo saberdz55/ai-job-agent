@@ -1,10 +1,8 @@
 """Configuration loading and validation.
 
-Keeps profile validation strict and runtime LLM configuration explicit so the
-agent can use either Anthropic or the OpenAI Responses API without changing the
-job pipeline.
+Secrets are loaded from environment variables and are never written to the
+repository. Local agent authentication is deliberately separate from the LLM key.
 """
-
 from __future__ import annotations
 
 import os
@@ -20,12 +18,8 @@ DEFAULT_PROVIDER = "anthropic"
 DEFAULT_MODEL = "claude-haiku-4-5"
 DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
 
-SourceName = str
-
 
 class SourceRef(BaseModel):
-    """One board to fetch: which ATS, and the board/company identifier."""
-
     ats: str
     board: str
     model_config = {"extra": "forbid"}
@@ -67,13 +61,13 @@ class SearchProfile(BaseModel):
 
 class Settings(BaseModel):
     """Runtime configuration. Keys are never persisted by the application."""
-
     provider: str = DEFAULT_PROVIDER
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
     model: str = DEFAULT_MODEL
     openai_model: str = DEFAULT_OPENAI_MODEL
     data_dir: Path = Path("data")
+    gateway_token: str | None = None
 
     @field_validator("provider")
     @classmethod
@@ -100,6 +94,7 @@ def load_settings() -> Settings:
         model=os.environ.get("JOB_AGENT_MODEL") or DEFAULT_MODEL,
         openai_model=os.environ.get("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL,
         data_dir=Path(os.environ.get("JOB_AGENT_DATA_DIR", "data")),
+        gateway_token=os.environ.get("JOB_AGENT_TOKEN") or None,
     )
 
 
@@ -107,11 +102,10 @@ def load_profile(path: str | Path) -> SearchProfile:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(
-            f"Search profile not found: {path}. "
-            f"Copy search_profile.example.yaml to {path} and edit it."
+            f"Search profile not found: {path}. Copy search_profile.example.yaml to {path} and edit it."
         )
     try:
-        raw = yaml.safe_load(path.read_text()) or {}
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise ValueError(f"Could not parse {path} as YAML: {exc}") from exc
     try:

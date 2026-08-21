@@ -1,0 +1,27 @@
+name: Vercel Control Plane
+
+on:
+  push:
+    branches:
+      - vercel-control-plane
+  pull_request:
+    paths:
+      - "web/**"
+      - ".github/workflows/vercel-control-plane.yml"
+
+jobs:
+  web-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package.json
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm run build

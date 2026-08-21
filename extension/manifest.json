@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Job Agent Bridge",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Controlled browser bridge for the local Job Agent.",
   "permissions": ["storage", "tabs"],
   "host_permissions": ["http://127.0.0.1:8643/*", "http://localhost:8643/*"],
   "background": {"service_worker":"service-worker.js"},
   "content_scripts":[{"matches":["http://*/*","https://*/*"],"js":["agent-bridge.js"],"run_at":"document_idle"}],
-  "action":{"default_title":"Job Agent"},
+  "action":{"default_title":"Job Agent","default_popup":"popup.html"},
   "options_page":"options.html"
 }

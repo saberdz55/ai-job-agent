@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from job_agent.config import load_profile, load_settings
-from job_agent.models import ScoredJob
 from job_agent.seen_cache import SeenCache
 from job_agent.store import load_job_record, save_search
 
@@ -57,6 +56,10 @@ def build_agent(*, data_dir: Path, profile: Path):
         raise RuntimeError("Install agent support: pip install -e '.[phone-agent]'") from exc
 
     settings = load_settings()
+    # The base CLI remains backward-compatible with Anthropic, but the Agent
+    # should prefer OpenAI when the user supplied only an OpenAI key.
+    if settings.provider == "anthropic" and settings.openai_api_key and not settings.anthropic_api_key:
+        settings.provider = "openai"
 
     @function_tool
     def inspect_status() -> str:
@@ -129,9 +132,7 @@ def build_agent(*, data_dir: Path, profile: Path):
         if not path.exists():
             return _json({"ok": False, "error": "candidate_facts_missing",
                           "next": "Create data/career_facts.yaml from the template before tailoring."})
-        text = path.read_text(encoding="utf-8")
-        # The file is intentionally plain facts; the model receives only this content.
-        return _json({"ok": True, "facts": text[:30000]})
+        return _json({"ok": True, "facts": path.read_text(encoding="utf-8")[:30000]})
 
     @function_tool
     def prepare_application(job_id: str) -> str:

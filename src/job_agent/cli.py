@@ -176,9 +176,6 @@ def cmd_search(console: Console, args: argparse.Namespace) -> int:
                         first_seen=outcome.first_seen, new_job_ids=outcome.new_job_ids,
                         baseline=outcome.baseline_scan,
                         sources_queried=len(outcome.per_source))
-    # Hide roles with an in-flight application (everything is still SAVED above;
-    # this is a render-level filter — --include-applied overrides it). getattr:
-    # programmatic callers (the dashboard) build their own Namespace.
     shown, hidden = scored, []
     if not getattr(args, "include_applied", False):
         from job_agent.apply.tracker import applied_markers
@@ -205,7 +202,6 @@ def _megaprompt() -> str:
         return "(mega prompt unavailable; using stub)"
 
 
-# Appended to a retry when the first attempt overshoots the bullet caps.
 _CAP_CORRECTION = (
     "Your previous draft exceeded the responsibility-bullet limits. Regenerate it and, under "
     "each 'Responsibilities:' heading, count the bullets: the most-recent (first) role must have "
@@ -215,13 +211,10 @@ _CAP_CORRECTION = (
 
 
 def _gate(facts, result, jd: str | None = None) -> TailorResult:
-    """Force the header, reorder skills by JD emphasis, and run the no-drift +
-    format gates on the face (incl. the JD-summary check when ``jd`` is given).
-    Returns the checked (face) result, or raises DriftError / FormatError."""
     face = trim_to_caps(clean_resume_text(
         normalize_header(result.resume_text, facts.name, facts.email, facts.phone)))
     if jd:
-        face = reorder_skills(face, jd)   # deterministic: JD-emphasized lines first
+        face = reorder_skills(face, jd)
     checked = TailorResult(resume_text=face, notes=result.notes, raw=result.raw)
     verify_no_drift(checked, facts)
     verify_format(checked, facts, jd)
@@ -230,11 +223,6 @@ def _gate(facts, result, jd: str | None = None) -> TailorResult:
 
 def _write(console: Console, checked: TailorResult, out_dir: Path, filename: str,
            facts=None) -> int:
-    """Render the PDF + docx, run the PDF gate, print NOTES + page count.
-
-    With ``facts`` given, also runs the final-artifact scope check — an unbanked
-    scale qualifier in the RENDERED text raises ScopeDriftError (caller may
-    regenerate once)."""
     console.print("[green]✓ No-drift + format gates passed[/green]")
     face = checked.resume_text
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -244,16 +232,12 @@ def _write(console: Console, checked: TailorResult, out_dir: Path, filename: str
     engine = "LibreOffice (PDF matches .docx)" if use_soffice else "reportlab (LibreOffice not found)"
 
     def render(face_text: str) -> Path:
-        """Write the .docx (source of truth) and produce the PDF from it."""
         render_docx(face_text, docx_path)
         if use_soffice and (pdf := docx_to_pdf(docx_path, out_dir)):
             return pdf
-        render_pdf(face_text, pdf_path)  # fallback
+        render_pdf(face_text, pdf_path)
         return pdf_path
 
-    # Fit to the page budget on the ACTUAL output engine: render, and while it
-    # runs long drop the least-relevant responsibility bullet (never an
-    # achievement/metric, and never below each role's depth floor).
     pdf_out = render(face)
     pages = pdf_page_count(pdf_out)
     dropped = 0
@@ -262,11 +246,11 @@ def _write(console: Console, checked: TailorResult, out_dir: Path, filename: str
             break
         trimmed = drop_last_responsibility(face)
         if trimmed == face:
-            break  # at the floor; can't trim further
+            break
         face, dropped = trimmed, dropped + 1
         pdf_out = render(face)
         pages = pdf_page_count(pdf_out)
-    (out_dir / f"{filename}.face.txt").write_text(face)  # for offline re-rendering
+    (out_dir / f"{filename}.face.txt").write_text(face)
     console.print(f"[dim]PDF engine: {engine}."
                   + (f" Trimmed {dropped} least-relevant bullet(s) to fit "
                      f"{MAX_RESUME_PAGES} pages." if dropped else ""))
@@ -277,7 +261,7 @@ def _write(console: Console, checked: TailorResult, out_dir: Path, filename: str
         console.print(f"[red]PDF verification failed:[/red] {exc}")
         return 1
     if facts is not None:
-        verify_artifact(pdf_out, facts)   # ScopeDriftError propagates to the caller
+        verify_artifact(pdf_out, facts)
     console.print(f"[green]✓ ATS check passed[/green] — sections in order: {', '.join(sections)} "
                   f"([bold]{pages} page{'s' if pages != 1 else ''}[/bold])")
     console.print(f"[bold]PDF:[/bold] {pdf_out}\n[bold]DOCX:[/bold] {docx_path}")
@@ -288,7 +272,6 @@ def _write(console: Console, checked: TailorResult, out_dir: Path, filename: str
 
 def cmd_tailor(console: Console, args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir)
-
     if args.demo:
         console.print("[bold cyan]job-agent tailor — demo mode[/bold cyan] (fake resume + JD, no key)\n")
         facts = load_career_facts(DEMO_DIR / "demo_career_facts.yaml")
@@ -303,7 +286,6 @@ def cmd_tailor(console: Console, args: argparse.Namespace) -> int:
         filename = _resume_filename(facts.name.split()[0], facts.role, "Demo")
         return _write(console, checked, out_dir, filename, facts)
 
-    # real run
     if not args.job:
         console.print("[red]Provide --job <id>[/red] (from a prior `search`) or use --demo.")
         return 2
@@ -323,7 +305,6 @@ def cmd_tailor(console: Console, args: argparse.Namespace) -> int:
                       "Run `search` first, then pass an ID from the table.")
         return 2
     job = Job.model_validate(record)
-
     if args.jd:
         jd = Path(args.jd).read_text()
     else:
@@ -334,11 +315,6 @@ def cmd_tailor(console: Console, args: argparse.Namespace) -> int:
 
     console.print(f"[bold cyan]job-agent tailor[/bold cyan] — tailoring with {TAILOR_MODEL}\n")
     filename = _resume_filename(facts.name.split()[0], job.title, job.company)
-
-    # Tailor, then gate. Format issues, unsupported scope qualifiers, and an
-    # omitted employer get ONE regeneration with the gate's message as a
-    # correction; hard fabrication (DriftError) is never retried.
-    # (megaprompt=None so tailor_resume loads the base prompt + policy addendum.)
     checked = None
     correction = None
     for attempt in (1, 2):
@@ -346,7 +322,7 @@ def cmd_tailor(console: Console, args: argparse.Namespace) -> int:
         try:
             checked = _gate(facts, result, jd)
             break
-        except DriftError as exc:  # fabrication — never retry, fail loudly
+        except DriftError as exc:
             console.print(f"[red]No-drift gate FAILED — refusing to write PDF:[/red]\n{exc}")
             return 1
         except (FormatError, ScopeDriftError, MissingEmployerError) as exc:
@@ -359,8 +335,6 @@ def cmd_tailor(console: Console, args: argparse.Namespace) -> int:
     try:
         return _write(console, checked, out_dir, filename, facts)
     except ScopeDriftError as exc:
-        # An unbanked scale qualifier survived to the RENDERED artifact —
-        # regenerate once with the violation as a correction, then give up loudly.
         console.print(f"[yellow]Artifact scope check failed, regenerating once:[/yellow] {exc}")
         result = tailor_resume(facts, jd, settings=settings,
                                extra_instruction=f"Your previous draft was REJECTED:\n{exc}\n"
@@ -374,12 +348,11 @@ def cmd_tailor(console: Console, args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
-#  apply  (Slice 4 — assisted apply in a visible browser)
+# apply
 # --------------------------------------------------------------------------- #
 
 def _find_tailored_resume(explicit: str | None, tailor_out: Path,
                           facts, record: dict) -> Path | None:
-    """Locate the tailored PDF for this job, or None (review will then pause)."""
     if explicit:
         return Path(explicit)
     fname = _resume_filename(facts.name.split()[0], record.get("title", ""),
@@ -403,32 +376,25 @@ def cmd_apply(console: Console, args: argparse.Namespace) -> int:
     from job_agent.apply.demo_apply import run_demo
     from job_agent.apply.prompt_io import PromptIO
     from job_agent.apply.runner import ApplyConfig, run_apply
-
-    io = PromptIO()  # plain input/print — the review text is not rich markup
-
+    io = PromptIO()
     try:
         if args.demo:
-            console.print("[bold]apply --demo[/bold] — local fake form, zero network, "
-                          "no real employer.\n")
+            console.print("[bold]apply --demo[/bold] — local fake form, zero network, no real employer.\n")
             result = run_demo(io, headless=not args.headed)
             _print_apply_result(console, result)
             return 0
-
         if not args.job:
             console.print("[red]apply needs --job <id> (from a prior search) or --demo.[/red]")
             return 2
-
         settings = load_settings()
         record = load_job_record(settings.data_dir / "last_search.json", args.job)
         if not record:
-            console.print(f"[red]Job id {args.job!r} not found in data/last_search.json.[/red] "
-                          "Run a search first.")
+            console.print(f"[red]Job id {args.job!r} not found in data/last_search.json.[/red] Run a search first.")
             return 1
         apply_url = resolve_apply_url(record)
         if not apply_url:
             console.print("[red]That job record has no apply/URL to open.[/red]")
             return 1
-
         facts = load_career_facts(args.facts)
         try:
             bank = load_answer_bank(args.answers)
@@ -438,41 +404,26 @@ def cmd_apply(console: Console, args: argparse.Namespace) -> int:
         contact = resolve_contact(facts, bank)
         resume = _find_tailored_resume(args.resume, Path(args.tailor_out), facts, record)
         if resume is None:
-            console.print("[yellow]No tailored resume found[/yellow] — the resume upload will "
-                          "be left empty and paused on. Pass --resume PATH or run `tailor` first.")
-
+            console.print("[yellow]No tailored resume found[/yellow] — the resume upload will be left empty and paused on. Pass --resume PATH or run `tailor` first.")
         if not args.submit:
-            console.print("[yellow]DRY RUN[/yellow] — preview + fill only. Nothing is submitted. "
-                          "Add [bold]--submit[/bold] to enable real submission (still gated by "
-                          "your explicit approval).\n")
-
-        # Screening-question drafting: grounded Haiku drafts, shown as
-        # [AI-DRAFT] at the review gate. Off without an API key.
+            console.print("[yellow]DRY RUN[/yellow] — preview + fill only. Nothing is submitted. Add [bold]--submit[/bold] to enable real submission (still gated by your explicit approval).\n")
         drafter = None
         if settings.anthropic_api_key:
             from job_agent.apply.screening import make_drafter, make_llm_generate
-            drafter = make_drafter(
-                make_llm_generate(settings), facts, bank,
-                jd=record.get("description") or "",
-                company=record.get("company", ""),
-                cache_path=settings.data_dir / "answers_cache.json",
-            )
+            drafter = make_drafter(make_llm_generate(settings), facts, bank,
+                                   jd=record.get("description") or "",
+                                   company=record.get("company", ""),
+                                   cache_path=settings.data_dir / "answers_cache.json")
         else:
-            console.print("[dim]No ANTHROPIC_API_KEY — screening questions will pause "
-                          "instead of being AI-drafted.[/dim]")
-
+            console.print("[dim]No ANTHROPIC_API_KEY — screening questions will pause instead of being AI-drafted.[/dim]")
         cfg = ApplyConfig(
             apply_url=apply_url, bank=bank, contact=contact, resume_path=resume,
             submit_flag=args.submit, headless=False, out_dir=Path(args.out_dir),
             job_label=f"{record.get('company', '?')} — {record.get('title', '?')}",
-            drafter=drafter,
-            answer_cache=settings.data_dir / "answers_cache.json",
-            company=record.get("company", ""),
-            job_id=record.get("id", ""),
-            job_title=record.get("title", ""),
-            source=record.get("source", ""),
-            applications_log=settings.data_dir / "applications.json",
-        )
+            drafter=drafter, answer_cache=settings.data_dir / "answers_cache.json",
+            company=record.get("company", ""), job_id=record.get("id", ""),
+            job_title=record.get("title", ""), source=record.get("source", ""),
+            applications_log=settings.data_dir / "applications.json")
         result = run_apply(cfg, io=io)
         _print_apply_result(console, result)
         return 0
@@ -481,13 +432,8 @@ def cmd_apply(console: Console, args: argparse.Namespace) -> int:
         return 1
 
 
-# --------------------------------------------------------------------------- #
-#  applications  (the gitignored apply-attempt log, as a table)
-# --------------------------------------------------------------------------- #
-
 def cmd_applications(console: Console, args: argparse.Namespace) -> int:
     from job_agent.apply.tracker import load_applications
-
     records = load_applications(Path(args.log))
     if not records:
         console.print("[dim]No applications logged yet — run `job_agent apply`.[/dim]")
@@ -495,180 +441,114 @@ def cmd_applications(console: Console, args: argparse.Namespace) -> int:
     table = Table(title=f"Applications ({len(records)})")
     for col in ("Date", "Company", "Role", "Status", "Source", "Job id"):
         table.add_column(col)
-    status_style = {"submitted": "bold green", "paused": "yellow", "failed": "red",
-                    "saved": "dim", "applied": "cyan", "interviewing": "magenta",
-                    "offer": "bold green", "rejected": "red"}
+    status_style = {"submitted": "bold green", "paused": "yellow", "failed": "red", "saved": "dim", "applied": "cyan", "interviewing": "magenta", "offer": "bold green", "rejected": "red"}
     for r in sorted(records, key=lambda r: r.date, reverse=True):
         style = status_style.get(r.status, "white")
-        table.add_row(r.date[:16].replace("T", " "), r.company, r.title,
-                      f"[{style}]{r.status}[/{style}]", r.source, r.job_id)
+        table.add_row(r.date[:16].replace("T", " "), r.company, r.title, f"[{style}]{r.status}[/{style}]", r.source, r.job_id)
     console.print(table)
     return 0
 
-
-# --------------------------------------------------------------------------- #
-#  dashboard  (local web UI over the same functions — 127.0.0.1 ONLY)
-# --------------------------------------------------------------------------- #
 
 def cmd_dashboard(console: Console, args: argparse.Namespace) -> int:
     try:
         import uvicorn
     except ImportError:
-        console.print("[red]The dashboard needs fastapi + uvicorn:[/red] "
-                      "pip install 'job-agent[dashboard]' (or pip install fastapi uvicorn)")
+        console.print("[red]The dashboard needs fastapi + uvicorn:[/red] pip install 'job-agent[dashboard]' (or pip install fastapi uvicorn)")
         return 1
     from job_agent.dashboard.app import create_app
-
     settings = load_settings()
     app = create_app(data_dir=settings.data_dir, profile_path=Path(args.profile))
-    console.print(f"[bold cyan]job-agent dashboard[/bold cyan] — "
-                  f"http://127.0.0.1:{args.port}  (local only; Ctrl-C to stop)")
-    # 127.0.0.1 is deliberate and not configurable: this UI serves personal
-    # data (application history, career facts) with no auth layer.
+    console.print(f"[bold cyan]job-agent dashboard[/bold cyan] — http://127.0.0.1:{args.port}  (local only; Ctrl-C to stop)")
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
     return 0
 
 
-# --------------------------------------------------------------------------- #
-# discover  (board-token discovery: probe candidates against official ATS APIs)
-# --------------------------------------------------------------------------- #
-
 def _configured_boards(profile_path: str) -> set[tuple[str, str]]:
-    """(ats, board) pairs already in the profile — marked, never edited."""
     import yaml
     try:
         raw = yaml.safe_load(Path(profile_path).read_text()) or {}
-        return {(s.get("ats", ""), str(s.get("board", "")))
-                for s in raw.get("sources", []) if isinstance(s, dict)}
+        return {(s.get("ats", ""), str(s.get("board", ""))) for s in raw.get("sources", []) if isinstance(s, dict)}
     except (OSError, yaml.YAMLError):
         return set()
 
 
 def cmd_discover(console: Console, args: argparse.Namespace) -> int:
     from job_agent.discovery import DiscoveryCache, discover_boards, format_yaml_block
-
     input_path = Path(args.input)
     if not input_path.exists():
-        console.print(f"[red]Candidate file not found:[/red] {input_path} — "
-                      "create it with one company name per line (# comments ok).")
+        console.print(f"[red]Candidate file not found:[/red] {input_path} — create it with one company name per line (# comments ok).")
         return 2
     candidates = input_path.read_text().splitlines()
     configured = _configured_boards(args.profile)
-
-    console.print(f"[bold cyan]job-agent discover[/bold cyan] — probing "
-                  f"{sum(1 for c in candidates if c.strip() and not c.startswith('#'))} "
-                  f"candidates against greenhouse/lever/ashby (~2 req/s, cached)\n")
-    result = discover_boards(
-        candidates, cache=DiscoveryCache(args.cache),
-        on_hit=lambda h: console.print(
-            f"  [green]✓[/green] {h.name:32} -> {h.ats}/{h.token}"
-            + ("  [dim](already in profile)[/dim]"
-               if (h.ats, h.token) in configured else "")))
-
+    console.print(f"[bold cyan]job-agent discover[/bold cyan] — probing {sum(1 for c in candidates if c.strip() and not c.startswith('#'))} candidates against greenhouse/lever/ashby (~2 req/s, cached)\n")
+    result = discover_boards(candidates, cache=DiscoveryCache(args.cache),
+        on_hit=lambda h: console.print(f"  [green]✓[/green] {h.name:32} -> {h.ats}/{h.token}" + ("  [dim](already in profile)[/dim]" if (h.ats, h.token) in configured else "")))
     new = [h for h in result.hits if (h.ats, h.token) not in configured]
     known = len(result.hits) - len(new)
     per_ats = {}
     for h in result.hits:
         per_ats[h.ats] = per_ats.get(h.ats, 0) + 1
-
     block = format_yaml_block(new)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        "# Board tokens validated live against official ATS APIs by `job-agent discover`.\n"
-        "# Merge the entries you want into search_profile.yaml under `sources:` —\n"
-        "# this file is never merged automatically.\n"
-        "sources:\n" + block + "\n")
-
-    console.print(f"\n[bold]Validated {len(result.hits)}[/bold] "
-                  f"({', '.join(f'{a}: {n}' for a, n in sorted(per_ats.items()))})"
-                  + (f" — {known} already in your profile" if known else ""))
+    out_path.write_text("# Board tokens validated live against official ATS APIs by `job-agent discover`.\n# Merge the entries you want into search_profile.yaml under `sources:` —\n# this file is never merged automatically.\nsources:\n" + block + "\n")
+    console.print(f"\n[bold]Validated {len(result.hits)}[/bold] ({', '.join(f'{a}: {n}' for a, n in sorted(per_ats.items()))})" + (f" — {known} already in your profile" if known else ""))
     if result.transient:
-        console.print(f"[yellow]{len(result.transient)} probe(s) hit transient errors "
-                      f"(not cached; re-run to retry):[/yellow] "
-                      + "; ".join(result.transient[:5])
-                      + ("…" if len(result.transient) > 5 else ""))
-    console.print(f"[dim]{result.probed} network probe(s) this run; verdicts cached in "
-                  f"{args.cache}.[/dim]")
+        console.print(f"[yellow]{len(result.transient)} probe(s) hit transient errors (not cached; re-run to retry):[/yellow] " + "; ".join(result.transient[:5]) + ("…" if len(result.transient) > 5 else ""))
+    console.print(f"[dim]{result.probed} network probe(s) this run; verdicts cached in {args.cache}.[/dim]")
     if new:
-        console.print(f"\n[bold]Ready to merge into search_profile.yaml "
-                      f"({len(new)} new):[/bold]\nsources:\n{block}")
+        console.print(f"\n[bold]Ready to merge into search_profile.yaml ({len(new)} new):[/bold]\nsources:\n{block}")
     console.print(f"[bold]Saved:[/bold] {out_path}")
     return 0
 
 
-# --------------------------------------------------------------------------- #
-
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="job_agent",
-                                     description="Discover, score, and tailor to jobs.")
+    parser = argparse.ArgumentParser(prog="job_agent", description="Discover, score, and tailor to jobs.")
     sub = parser.add_subparsers(dest="command")
-
     s = sub.add_parser("search", help="Discover fresh jobs and score their fit.")
     s.add_argument("--demo", action="store_true", help="Bundled mock jobs (no key/network).")
     s.add_argument("--profile", default="search_profile.yaml")
-    s.add_argument("--days", type=int, default=30,
-                   help="Recency window in days (default 30).")
-    s.add_argument("--max-age-hours", type=int, default=None,
-                   help="Recency window in hours; overrides --days when given.")
+    s.add_argument("--days", type=int, default=30, help="Recency window in days (default 30).")
+    s.add_argument("--max-age-hours", type=int, default=None, help="Recency window in hours; overrides --days when given.")
     s.add_argument("--limit", type=int, default=None)
     s.add_argument("--method", choices=["structured", "tool"], default="structured")
-    s.add_argument("--include-applied", action="store_true",
-                   help="Also show jobs you already applied to (hidden by default).")
-
+    s.add_argument("--include-applied", action="store_true", help="Also show jobs you already applied to (hidden by default).")
     t = sub.add_parser("tailor", help="Tailor your resume to a searched job.")
     t.add_argument("--demo", action="store_true", help="Fake resume + JD end-to-end (no key).")
     t.add_argument("--job", help="Job id from a prior search (data/last_search.json).")
     t.add_argument("--facts", default="data/career_facts.yaml", help="Career facts YAML.")
     t.add_argument("--jd", help="Use this JD text file instead of re-fetching.")
     t.add_argument("--out-dir", default="data/output", help="Where to write the PDF/DOCX.")
-
     a = sub.add_parser("apply", help="Assisted apply in a visible browser (human-gated).")
-    a.add_argument("--demo", action="store_true",
-                   help="Run the whole flow against a local fake form (no key/network).")
+    a.add_argument("--demo", action="store_true", help="Run the whole flow against a local fake form (no key/network).")
     a.add_argument("--job", help="Job id from a prior search (opens its apply URL).")
-    a.add_argument("--submit", action="store_true",
-                   help="Enable REAL submission (still gated by your in-session approval).")
+    a.add_argument("--submit", action="store_true", help="Enable REAL submission (still gated by your in-session approval).")
     a.add_argument("--answers", default="data/answer_bank.yaml", help="Answer bank YAML.")
     a.add_argument("--facts", default="data/career_facts.yaml", help="Career facts YAML.")
     a.add_argument("--resume", default=None, help="Tailored resume PDF to upload.")
-    a.add_argument("--tailor-out", default="data/output", dest="tailor_out",
-                   help="Where tailored resumes are written (for auto-detect).")
+    a.add_argument("--tailor-out", default="data/output", dest="tailor_out", help="Where tailored resumes are written (for auto-detect).")
     a.add_argument("--out-dir", default="data/apply", help="Where to write logs/screenshots.")
-    a.add_argument("--headed", action="store_true",
-                   help="Demo only: show the browser window (demo defaults to headless).")
-
+    a.add_argument("--headed", action="store_true", help="Demo only: show the browser window (demo defaults to headless).")
     ap = sub.add_parser("applications", help="Show the log of every apply attempt.")
-    ap.add_argument("--log", default="data/applications.json",
-                    help="Path to the (gitignored) applications log.")
-
+    ap.add_argument("--log", default="data/applications.json", help="Path to the (gitignored) applications log.")
     d = sub.add_parser("dashboard", help="Local web dashboard (binds 127.0.0.1 only).")
     d.add_argument("--port", type=int, default=8642)
     d.add_argument("--profile", default="search_profile.yaml")
-
-    dc = sub.add_parser("discover",
-                        help="Probe candidate companies for valid ATS board tokens.")
-    dc.add_argument("--input", default="data/candidate_companies.txt",
-                    help="Text file of company names, one per line (# comments ok).")
-    dc.add_argument("--out", default="data/output/discovered_boards.yaml",
-                    help="Where to write the ready-to-merge YAML block.")
-    dc.add_argument("--cache", default="data/discovery_cache.json",
-                    help="Probe-verdict cache (makes re-runs free).")
-    dc.add_argument("--profile", default="search_profile.yaml",
-                    help="Used only to mark already-configured boards; never edited.")
+    dc = sub.add_parser("discover", help="Probe candidate companies for valid ATS board tokens.")
+    dc.add_argument("--input", default="data/candidate_companies.txt", help="Text file of company names, one per line (# comments ok).")
+    dc.add_argument("--out", default="data/output/discovered_boards.yaml", help="Where to write the ready-to-merge YAML block.")
+    dc.add_argument("--cache", default="data/discovery_cache.json", help="Probe-verdict cache (makes re-runs free).")
+    dc.add_argument("--profile", default="search_profile.yaml", help="Used only to mark already-configured boards; never edited.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # Back-compat: no subcommand (or a leading flag) means `search`.
     if not argv or (argv[0] not in SUBCOMMANDS and argv[0] not in ("-h", "--help")):
         argv = ["search"] + argv
     args = _build_parser().parse_args(argv)
     console = Console()
-    dispatch = {"tailor": cmd_tailor, "apply": cmd_apply,
-                "applications": cmd_applications, "dashboard": cmd_dashboard,
-                "discover": cmd_discover}
+    dispatch = {"tailor": cmd_tailor, "apply": cmd_apply, "applications": cmd_applications, "dashboard": cmd_dashboard, "discover": cmd_discover}
     handler = dispatch.get(args.command, cmd_search)
     try:
         return handler(console, args)

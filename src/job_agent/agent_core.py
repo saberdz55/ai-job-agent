@@ -13,7 +13,7 @@ from job_agent.config import load_profile, load_settings
 from job_agent.seen_cache import SeenCache
 from job_agent.store import load_job_record, save_search
 
-SYSTEM = """You are Job Agent, a production-minded job-search assistant.
+SYSTEM = """You are Job Agent, a production-minded job-search and application-preparation assistant.
 
 GOAL: find legitimate jobs that genuinely fit the candidate, explain the match,
 prepare truthful application material, and guide the user through application.
@@ -21,17 +21,20 @@ prepare truthful application material, and guide the user through application.
 RULES:
 - Never invent experience, education, salary, authorization, certifications,
   metrics, dates, employers, or answers. Missing facts are UNKNOWN.
-- Prefer official employer career pages and ATS sources. Respect rate limits,
-  robots and site terms.
+- Prefer official employer career pages and ATS sources. For broad web search,
+  prefer the employer's own career page or the ATS application URL as the final
+  source. Do not treat an aggregator as proof of eligibility or sponsorship.
 - Use tools for factual data; do not pretend a tool ran when it did not.
 - Treat scoring as evidence, not truth. Show missing/uncertain requirements.
-- On Android, the local Python process is the control plane and the browser
-  extension is the visible form-filling plane.
+- A strong match must satisfy the candidate's hard constraints before ranking.
+- Tailored CVs and motivation letters may rephrase or emphasize only verified facts.
+- Each motivation letter must be specific to the role/company and must not claim
+  knowledge of a company or product that was not established by the job/company source.
 - CAPTCHA, login, 2FA, legal attestations and unknown sensitive questions are
   STOP conditions for user action; never bypass them.
 - There is NO submit tool in the Agent. Final submission is always a human action.
 - When a task is ambiguous, ask one concise question rather than guessing.
-- Keep tool calls bounded: search at most 90 days and 100 returned jobs per call.
+- Keep deterministic job searches bounded: at most 90 days and 100 returned jobs per call.
 """
 
 
@@ -69,20 +72,20 @@ def build_agent(*, data_dir: Path, profile: Path):
     def inspect_status() -> str:
         """Return runtime capabilities without exposing secrets."""
         return _json({
-            "runtime": "android-phone",
+            "runtime": "local-agent",
             "provider": "openai",
             "model": settings.active_model(),
             "capabilities": [
-                "job_discovery", "fit_scoring", "job_inspection",
+                "job_discovery", "web_search", "fit_scoring", "job_inspection",
                 "candidate_facts", "application_preparation", "session_memory",
             ],
-            "desktop_playwright": False,
+            "desktop_playwright": True,
             "automatic_submission": False,
         })
 
     @function_tool
     def search_jobs(days: int = 7, limit: int = 25) -> str:
-        """Discover, filter, deduplicate and score jobs using the existing pipeline."""
+        """Discover, filter, deduplicate and score jobs using the deterministic pipeline."""
         days = max(1, min(int(days), 90))
         limit = max(1, min(int(limit), 100))
         prof = load_profile(profile)
@@ -148,8 +151,8 @@ def build_agent(*, data_dir: Path, profile: Path):
             "job": {k: record.get(k) for k in
                     ("id", "title", "company", "location", "url", "apply_url", "source")},
             "steps": [
-                "Open the stored application URL in the Android browser.",
-                "Use the extension to map visible fields to verified candidate facts.",
+                "Open the stored application URL in the desktop browser worker.",
+                "Inspect the visible form and map only verified candidate facts.",
                 "Stop on CAPTCHA/login/2FA/unknown sensitive question.",
                 "Review all fields and the job-specific motivation letter.",
                 "User performs the final submission.",
@@ -158,9 +161,17 @@ def build_agent(*, data_dir: Path, profile: Path):
             "automatic_submission": False,
         })
 
+    tools = [inspect_status, search_jobs, get_job, get_candidate_facts, prepare_application]
+    try:
+        from agents import WebSearchTool
+        tools.append(WebSearchTool())
+    except ImportError:
+        # Older openai-agents versions can still run the deterministic pipeline.
+        pass
+
     return Agent(
         name="Job Agent",
         model=settings.active_model(),
         instructions=SYSTEM,
-        tools=[inspect_status, search_jobs, get_job, get_candidate_facts, prepare_application],
+        tools=tools,
     )

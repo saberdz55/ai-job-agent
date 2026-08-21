@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "job-agent"
-version = "0.2.0"
+version = "0.3.0"
 description = "A resilient AI job-hunting and assisted-application agent."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -54,6 +54,7 @@ desktop = [
 job-agent = "job_agent.cli:main"
 job-agent-phone = "job_agent.phone:main"
 job-agent-agent = "job_agent.agent_cli:main"
+job-agent-agent-server = "job_agent.agent_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/job_agent"]

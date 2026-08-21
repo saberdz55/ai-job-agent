@@ -39,6 +39,11 @@ phone = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
 ]
+phone-agent = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "openai-agents>=0.2",
+]
 desktop = [
     "playwright>=1.40",
     "uvicorn>=0.29",
@@ -48,6 +53,7 @@ desktop = [
 [project.scripts]
 job-agent = "job_agent.cli:main"
 job-agent-phone = "job_agent.phone:main"
+job-agent-agent = "job_agent.agent_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/job_agent"]

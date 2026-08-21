@@ -26,8 +26,10 @@ def create_agent_app(*, data_dir: Path, profile: Path):
 
     data_dir.mkdir(parents=True, exist_ok=True)
     settings = load_settings()
-    token = settings.gateway_token or secrets.token_urlsafe(32)
-    app = FastAPI(title="Job Agent", version="0.7.0")
+    if not settings.gateway_token or len(settings.gateway_token) < 32:
+        raise RuntimeError("JOB_AGENT_TOKEN must be a random secret of at least 32 characters.")
+    token = settings.gateway_token
+    app = FastAPI(title="Job Agent", version="0.7.1")
     agent = build_agent(data_dir=data_dir, profile=profile)
     db_path = data_dir / "agent_sessions.db"
     facts_path = data_dir / "career_facts.yaml"
@@ -62,8 +64,10 @@ def create_agent_app(*, data_dir: Path, profile: Path):
 
     def check_local_origin(request: Request) -> None:
         origin = request.headers.get("origin")
-        if origin is not None and not (origin in ("http://127.0.0.1:8643", "http://localhost:8643")
-                                       or origin.startswith("chrome-extension://")):
+        if origin is not None and not (
+            origin in ("http://127.0.0.1:8643", "http://localhost:8643")
+            or origin.startswith("chrome-extension://")
+        ):
             raise HTTPException(status_code=403, detail="origin_not_allowed")
 
     def load_facts() -> dict[str, object]:
@@ -137,8 +141,8 @@ def main() -> int:
     if args.host != "127.0.0.1":
         raise SystemExit("Agent server refuses non-local bind without authenticated deployment.")
     settings = load_settings()
-    if not settings.gateway_token:
-        raise SystemExit("JOB_AGENT_TOKEN is required. Generate a strong random token and set it in the environment.")
+    if not settings.gateway_token or len(settings.gateway_token) < 32:
+        raise SystemExit("JOB_AGENT_TOKEN is required and must be at least 32 characters.")
     app = create_agent_app(data_dir=settings.data_dir, profile=Path(args.profile))
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

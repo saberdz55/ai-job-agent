@@ -1,11 +1,8 @@
 """Configuration loading and validation.
 
-Two things live here:
-
-* :class:`SearchProfile` — the validated contents of ``search_profile.yaml``
-  (roles, location rule, boards to fetch). Validated with Pydantic so a
-  malformed profile fails fast with a clear message instead of deep in a fetch.
-* :class:`Settings` — runtime bits from the environment (API key, model, paths).
+Keeps profile validation strict and runtime LLM configuration explicit so the
+agent can use either Anthropic or the OpenAI Responses API without changing the
+job pipeline.
 """
 
 from __future__ import annotations
@@ -19,11 +16,11 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from job_agent.seniority import LEVEL_NAMES
 
-# A low-cost, current Haiku-class model. Confirmed against the Anthropic docs
-# rather than assumed. Overridable via the JOB_AGENT_MODEL env var.
+DEFAULT_PROVIDER = "anthropic"
 DEFAULT_MODEL = "claude-haiku-4-5"
+DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
 
-SourceName = str  # validated against the known set below
+SourceName = str
 
 
 class SourceRef(BaseModel):
@@ -31,35 +28,25 @@ class SourceRef(BaseModel):
 
     ats: str
     board: str
-
     model_config = {"extra": "forbid"}
 
 
 class LocationRule(BaseModel):
     remote_ok: bool = True
     allowed_countries: list[str] = Field(default_factory=lambda: ["US"])
-
     model_config = {"extra": "forbid"}
 
 
 class SearchProfile(BaseModel):
-    """Validated ``search_profile.yaml``."""
-
     keywords: list[str] = Field(min_length=1)
     location: LocationRule = Field(default_factory=LocationRule)
     sources: list[SourceRef] = Field(min_length=1)
     candidate_summary: str = ""
-    # Optional seniority ceiling: titles ranked above this are dropped before
-    # scoring (see job_agent.seniority.LEVEL_NAMES). None = filter off.
     max_seniority: str | None = None
-    # Optional candidate years of experience: a job whose JD requires clearly
-    # more (see search.EXPERIENCE_GAP) is dropped before scoring. None = off.
     experience_years: int | None = Field(default=None, ge=0)
-
     model_config = {"extra": "forbid"}
 
     _KNOWN_ATS = {"greenhouse", "lever", "ashby", "smartrecruiters",
-                  # cross-company search sources: board = keyword query / tag
                   "sr-search", "remotive", "remoteok"}
 
     @field_validator("max_seniority")
@@ -75,34 +62,48 @@ class SearchProfile(BaseModel):
         return level
 
     def unknown_sources(self) -> list[str]:
-        """ATS names in the profile we don't have a source for."""
         return sorted({s.ats for s in self.sources if s.ats not in self._KNOWN_ATS})
 
 
 class Settings(BaseModel):
-    """Runtime settings from the environment."""
+    """Runtime configuration. Keys are never persisted by the application."""
 
+    provider: str = DEFAULT_PROVIDER
     anthropic_api_key: str | None = None
+    openai_api_key: str | None = None
     model: str = DEFAULT_MODEL
+    openai_model: str = DEFAULT_OPENAI_MODEL
     data_dir: Path = Path("data")
+
+    @field_validator("provider")
+    @classmethod
+    def _provider(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in {"anthropic", "openai"}:
+            raise ValueError("JOB_AGENT_PROVIDER must be 'anthropic' or 'openai'")
+        return value
+
+    def has_llm_key(self) -> bool:
+        return bool(self.openai_api_key if self.provider == "openai" else self.anthropic_api_key)
+
+    def active_model(self) -> str:
+        return self.openai_model if self.provider == "openai" else self.model
 
 
 def load_settings() -> Settings:
-    """Read ``.env`` (if present) and the environment into :class:`Settings`."""
-    load_dotenv()  # loads .env from CWD if it exists; no-op otherwise
+    load_dotenv()
+    provider = os.environ.get("JOB_AGENT_PROVIDER", DEFAULT_PROVIDER).strip().lower()
     return Settings(
+        provider=provider,
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY") or None,
+        openai_api_key=os.environ.get("OPENAI_API_KEY") or None,
         model=os.environ.get("JOB_AGENT_MODEL") or DEFAULT_MODEL,
+        openai_model=os.environ.get("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL,
         data_dir=Path(os.environ.get("JOB_AGENT_DATA_DIR", "data")),
     )
 
 
 def load_profile(path: str | Path) -> SearchProfile:
-    """Load and validate a search profile YAML file.
-
-    Raises :class:`FileNotFoundError` if missing and :class:`ValueError` with a
-    readable message if the YAML is malformed or fails validation.
-    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(

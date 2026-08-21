@@ -1,7 +1,7 @@
 """Localhost HTTP bridge for the Agent UI and browser bridge.
 
-The API key stays server-side. Conversation state is persisted in SQLite.
-Browser requests are inspection/preview only: no final submission endpoint exists.
+The API key and candidate facts stay server-side. Conversation state is persisted
+in SQLite. Browser requests are inspection/preview only: no final submission route.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ def create_agent_app(*, data_dir: Path, profile: Path):
         from fastapi import FastAPI, HTTPException, Request
         from pydantic import BaseModel, Field
         from agents import Runner, SQLiteSession
+        import yaml
     except ImportError as exc:
         raise RuntimeError("Install: pip install -e '.[phone-agent]'") from exc
 
@@ -22,9 +23,10 @@ def create_agent_app(*, data_dir: Path, profile: Path):
     from job_agent.application_guard import propose_field
 
     data_dir.mkdir(parents=True, exist_ok=True)
-    app = FastAPI(title="Job Agent", version="0.6.0")
+    app = FastAPI(title="Job Agent", version="0.6.1")
     agent = build_agent(data_dir=data_dir, profile=profile)
     db_path = data_dir / "agent_sessions.db"
+    facts_path = data_dir / "career_facts.yaml"
     locks: dict[str, asyncio.Lock] = {}
     locks_guard = asyncio.Lock()
 
@@ -41,7 +43,6 @@ def create_agent_app(*, data_dir: Path, profile: Path):
         action: str = Field(pattern=r"^(health|inspect_page|fill_preview)$")
         tab: dict[str, Any] = Field(default_factory=dict)
         page: dict[str, Any] = Field(default_factory=dict)
-        facts: dict[str, object] = Field(default_factory=dict)
 
     async def session_lock(session_id: str) -> asyncio.Lock:
         async with locks_guard:
@@ -52,14 +53,20 @@ def create_agent_app(*, data_dir: Path, profile: Path):
 
     def check_local_origin(request: Request) -> None:
         origin = request.headers.get("origin")
-        # Chrome extension pages use chrome-extension://<id>; the API is still
-        # bound to localhost, and the bridge accepts only the extension scheme
-        # or the local dashboard origins.
         if origin is not None and not (
             origin in ("http://127.0.0.1:8643", "http://localhost:8643")
             or origin.startswith("chrome-extension://")
         ):
             raise HTTPException(status_code=403, detail="origin_not_allowed")
+
+    def load_facts() -> dict[str, object]:
+        if not facts_path.exists():
+            return {}
+        try:
+            data = yaml.safe_load(facts_path.read_text(encoding="utf-8")) or {}
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
 
     @app.get("/api/agent/health")
     async def health() -> dict:
@@ -68,6 +75,7 @@ def create_agent_app(*, data_dir: Path, profile: Path):
             "agent": "job-agent",
             "runtime": "local-browser",
             "memory": "sqlite",
+            "candidate_facts_loaded": facts_path.exists(),
             "automatic_submission": False,
             "browser_bridge": True,
         }
@@ -92,8 +100,8 @@ def create_agent_app(*, data_dir: Path, profile: Path):
         check_local_origin(request)
         if payload.action == "health":
             return {"ok": True, "action": "health", "browser_bridge": True}
+        page = payload.page
         if payload.action == "inspect_page":
-            page = payload.page
             return {
                 "ok": True,
                 "action": "inspect_page",
@@ -108,13 +116,14 @@ def create_agent_app(*, data_dir: Path, profile: Path):
                 },
                 "next": "human_review_if_login_or_captcha",
             }
-        # Preview proposes only values that are explicitly present in candidate facts.
-        # It never mutates the page and it never returns a submit capability.
+        facts = load_facts()
         proposals = []
-        for item in list(payload.page.get("field_names", []))[:100]:
+        for item in list(page.get("field_names", []))[:100]:
             if not isinstance(item, dict):
                 continue
-            proposals.append(propose_field(str(item.get("label", "")), str(item.get("name", "")), payload.facts).__dict__)
+            proposals.append(
+                propose_field(str(item.get("label", "")), str(item.get("name", "")), facts).__dict__
+            )
         return {
             "ok": True,
             "action": "fill_preview",

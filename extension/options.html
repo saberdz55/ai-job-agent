@@ -1,1 +1,20 @@
-<!doctype html><meta charset="utf-8"><title>Job Agent</title><h1>Job Agent</h1><p>Controlled local bridge. OpenAI keys remain on the local agent.</p>
+<!doctype html>
+<meta charset="utf-8">
+<title>Job Agent Bridge Settings</title>
+<style>body{font:14px system-ui;max-width:620px;margin:40px auto;padding:0 20px}input{width:100%;padding:10px;box-sizing:border-box}button{margin-top:12px;padding:9px 14px}</style>
+<h1>Job Agent Bridge</h1>
+<p>The browser bridge talks only to your local agent. The OpenAI API key never belongs here.</p>
+<label for="token">Gateway token</label>
+<input id="token" type="password" autocomplete="off" spellcheck="false">
+<button id="save">Save token</button>
+<span id="status" role="status"></span>
+<script>
+const token = document.getElementById('token');
+const status = document.getElementById('status');
+chrome.storage.local.get(['gatewayToken'], x => { token.value = x.gatewayToken || ''; });
+document.getElementById('save').onclick = () => {
+  const value = token.value.trim();
+  if (!value) { status.textContent = 'Enter a gateway token.'; return; }
+  chrome.storage.local.set({gatewayToken:value}, () => { status.textContent = 'Saved locally.'; });
+};
+</script>
